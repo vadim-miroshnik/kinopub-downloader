@@ -35,15 +35,15 @@ const (
 // RunConfig holds all configuration for a single download run.
 type RunConfig struct {
 	InputURL        string
-	OutputPath      string        // "" → cwd (Req 11.1)
-	MaxConcurrency  int           // [1,16], default 2 (Req 4.1, 4.2)
-	MaxRetries      int           // default 5 (Req 5.6)
-	MinIntervalMS   int           // [0,60000] (Req 4.5)
-	ProxyURL        string        // explicit proxy; "" → system/direct
+	OutputPath      string // "" → cwd (Req 11.1)
+	MaxConcurrency  int    // [1,16], default 2 (Req 4.1, 4.2)
+	MaxRetries      int    // default 5 (Req 5.6)
+	MinIntervalMS   int    // [0,60000] (Req 4.5)
+	ProxyURL        string // explicit proxy; "" → system/direct
 	Quality         Quality
-	Verbosity       Verbosity     // default Normal (Req 14.1)
-	FFmpegPath      string        // default "ffmpeg" on PATH (Req 7.3)
-	LogFilePath     string        // "" → no file sink (Req 13.7)
+	Verbosity       Verbosity // default Normal (Req 14.1)
+	FFmpegPath      string    // default "ffmpeg" on PATH (Req 7.3)
+	LogFilePath     string    // "" → no file sink (Req 13.7)
 	Container       Container
 	ForceRedownload bool          // (Req 12.4)
 	SeasonSel       Selection     // (Req 15.5)
@@ -84,8 +84,31 @@ type RunConfig struct {
 	// all tracks are kept. The menu is only shown on a TTY.
 	AudioMenu bool
 	// AudioMenuTimeout bounds how long the interactive picker waits for input
-	// before defaulting to "keep all". Zero means use the package default.
+	// before defaulting to "keep all". Zero means use the package default. It is
+	// shared by the subtitle menu (SubtitleMenu) as well.
 	AudioMenuTimeout time.Duration
+
+	// SubtitlePref selects which subtitle tracks to keep. The zero value keeps
+	// every track. See SubtitlePreference for matching semantics. (subtitle
+	// selection)
+	SubtitlePref SubtitlePreference
+
+	// SubtitleMenu enables the interactive subtitle-track picker shown before the
+	// first download. When the user makes no choice within AudioMenuTimeout, all
+	// tracks are kept. The menu is only shown on a TTY.
+	SubtitleMenu bool
+
+	// SubtitlesExternal, when true, writes the selected subtitle tracks as
+	// sidecar .srt files instead of muxing them into the output container.
+	SubtitlesExternal bool
+
+	// SubtitlesOnly, when true, downloads and writes ONLY the selected subtitle
+	// tracks as sidecar .srt files and skips the video+audio download and mux
+	// entirely. Language selection reuses SubtitlePref / SubtitleMenu. It
+	// requires the HLS pipeline (subtitles originate from the HLS manifest);
+	// selection is strict, so a requested subtitle missing from an episode is an
+	// error rather than a fallback to another track.
+	SubtitlesOnly bool
 }
 
 // RequestAuth carries credentials and request-shaping headers applied to every

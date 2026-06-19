@@ -17,7 +17,8 @@ type Variant struct {
 	URL        string // media playlist URL (relative or absolute)
 	Width      int    // parsed from Resolution
 	Height     int    // parsed from Resolution
-	AudioGroup string // GROUP-ID of associated audio renditions (empty = muxed)
+	AudioGroup    string // GROUP-ID of associated audio renditions (empty = muxed)
+	SubtitleGroup string // GROUP-ID of associated subtitle renditions (empty = none)
 }
 
 // IsH265 reports whether this variant uses HEVC/H.265 codec.

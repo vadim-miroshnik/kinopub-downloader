@@ -29,10 +29,19 @@ type AudioRendition struct {
 	URI      string // media playlist URL for this audio track
 }
 
+// SubtitleRendition represents a subtitle track from the master playlist.
+type SubtitleRendition struct {
+	GroupID  string
+	Name     string
+	Language string
+	URI      string // media playlist URL for this subtitle track
+}
+
 // MasterPlaylist holds parsed data from an HLS master playlist.
 type MasterPlaylist struct {
-	Variants []Variant
-	Audio    []AudioRendition
+	Variants  []Variant
+	Audio     []AudioRendition
+	Subtitles []SubtitleRendition
 }
 
 // MediaPlaylist holds parsed data from an HLS media playlist.
@@ -147,6 +156,14 @@ func parseMasterPlaylist(r io.Reader, baseURL string) (*MasterPlaylist, error) {
 					URI:      resolveURL(baseURL, attrs["URI"]),
 				}
 				result.Audio = append(result.Audio, rendition)
+			} else if strings.ToUpper(attrs["TYPE"]) == "SUBTITLES" {
+				rendition := SubtitleRendition{
+					GroupID:  attrs["GROUP-ID"],
+					Name:     attrs["NAME"],
+					Language: attrs["LANGUAGE"],
+					URI:      resolveURL(baseURL, attrs["URI"]),
+				}
+				result.Subtitles = append(result.Subtitles, rendition)
 			}
 		} else if pendingVariant != nil && !strings.HasPrefix(line, "#") && line != "" {
 			pendingVariant.URL = resolveURL(baseURL, line)
@@ -219,6 +236,7 @@ func parseVariantAttrs(attrs string) Variant {
 	}
 	v.Codecs = parsed["CODECS"]
 	v.AudioGroup = parsed["AUDIO"]
+	v.SubtitleGroup = parsed["SUBTITLES"]
 
 	return v
 }

@@ -220,9 +220,19 @@ type HLSDownloader interface {
 	// the caller present an interactive picker and derive language preferences.
 	ListAudioTracks(ctx context.Context, manifestURL string, quality Quality) ([]AudioTrackInfo, error)
 
+	// ListSubtitleTracks fetches the master playlist and reports the subtitle
+	// tracks available for the selected quality, without downloading anything. It
+	// lets the caller present an interactive picker and derive language
+	// preferences.
+	ListSubtitleTracks(ctx context.Context, manifestURL string, quality Quality) ([]SubtitleTrackInfo, error)
+
 	// SetAudioPreference sets the audio-track filter applied to subsequent
 	// DownloadEpisode calls. The zero AudioPreference keeps every track.
 	SetAudioPreference(pref AudioPreference)
+
+	// SetSubtitlePreference sets the subtitle-track filter applied to subsequent
+	// DownloadEpisode calls. The zero SubtitlePreference keeps every track.
+	SetSubtitlePreference(pref SubtitlePreference)
 }
 
 // AudioChooser presents the available audio tracks to the user and returns the
@@ -234,11 +244,42 @@ type AudioChooser interface {
 	ChooseAudio(tracks []AudioTrackInfo, timeout time.Duration) ([]int, error)
 }
 
+// SubtitleChooser presents the available subtitle tracks to the user and
+// returns the indices to keep. Implementations may block for input up to a
+// timeout; on timeout or non-interactive input they should keep all tracks
+// (return nil).
+type SubtitleChooser interface {
+	// ChooseSubtitles shows tracks and returns the selected indices. A nil/empty
+	// result means "keep all tracks".
+	ChooseSubtitles(tracks []SubtitleTrackInfo, timeout time.Duration) ([]int, error)
+}
+
 // HLSMuxer muxes downloaded HLS video + audio files into a final container.
 type HLSMuxer interface {
 	// MuxHLS combines the video file and audio tracks into job.OutPath using
 	// ffmpeg (-c copy), applying labels, languages, and metadata.
 	MuxHLS(ctx context.Context, job Job, hls *HLSDownloadResult) error
+}
+
+// HLSSubtitleDownloader is an optional capability of an HLSDownloader: it
+// downloads ONLY the selected subtitle renditions of an episode (no video,
+// no audio). Implementations apply the preference set via SetSubtitlePreference
+// with strict matching (see SelectSubtitlesStrict) and return an error wrapping
+// ErrNoSubtitlesMatched when the selection yields no track. The result carries
+// only Subtitles and TempDir; the caller converts the tracks to sidecar files
+// and removes TempDir afterwards.
+type HLSSubtitleDownloader interface {
+	DownloadSubtitlesOnly(ctx context.Context, manifestURL string, quality Quality,
+		outBase string, key EpisodeKey, sink ProgressSink) (*HLSDownloadResult, error)
+}
+
+// SubtitleSidecarWriter is an optional capability of a Downloader: it writes the
+// subtitle tracks from an HLS result as standalone .srt sidecar files next to
+// job.OutPath, without muxing any video. It is used by the --subs-only pipeline.
+// When job.SubtitlesOnly is set, a conversion failure is returned as an error
+// (the sidecars are the only product); otherwise failures are logged best-effort.
+type SubtitleSidecarWriter interface {
+	WriteSubtitleSidecars(ctx context.Context, job Job, hls *HLSDownloadResult) error
 }
 
 // HLSDownloadResult contains info about a completed HLS download.
@@ -253,6 +294,10 @@ type HLSDownloadResult struct {
 	// AudioTracks are the local audio files downloaded separately (demuxed HLS).
 	// Empty when audio is muxed into the video stream.
 	AudioTracks []HLSAudioTrack
+	// Subtitles are the local subtitle tracks downloaded separately. Each Path
+	// points to a local media playlist (subs_i.m3u8) referencing local .vtt
+	// segments in the same directory. Empty when no subtitles were selected.
+	Subtitles []HLSSubtitleTrack
 	// TempDir is the directory holding the intermediate files; the caller
 	// should remove it after remuxing.
 	TempDir string
@@ -263,6 +308,13 @@ type HLSAudioTrack struct {
 	Path     string // local .ts/.aac file path
 	Name     string // studio/track label, e.g. "MVO, AniLibria"
 	Language string // language tag, e.g. "ru"
+}
+
+// HLSSubtitleTrack describes a downloaded subtitle rendition.
+type HLSSubtitleTrack struct {
+	Path     string // local media playlist path (subs_i.m3u8) referencing .vtt segments
+	Name     string // track label, e.g. "RUS #12"
+	Language string // language tag, e.g. "rus"
 }
 
 // PageScraper extracts playlist data from kino.pub pages.

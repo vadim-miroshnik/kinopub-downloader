@@ -46,6 +46,88 @@ func TestChooseAudio_Selection(t *testing.T) {
 	}
 }
 
+var sampleSubtitleTracks = []domain.SubtitleTrackInfo{
+	{Index: 0, Label: "Russian", Language: "rus"},
+	{Index: 1, Label: "English SDH", Language: "eng"},
+	{Index: 2, Label: "Japanese", Language: "jpn"},
+}
+
+func TestChooseSubtitles_Selection(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []int
+	}{
+		{"single", "1\n", []int{0}},
+		{"multi", "1,3\n", []int{0, 2}},
+		{"range", "1-2\n", []int{0, 1}},
+		{"all keyword", "all\n", nil},
+		{"empty line", "\n", nil},
+		{"whitespace", "  2  \n", []int{1}},
+		{"out of order dedup", "3,1,1\n", []int{0, 2}},
+		{"invalid keeps all", "abc\n", nil},
+		{"out of range keeps all", "9\n", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New(strings.NewReader(tt.input), &bytes.Buffer{}, true)
+			got, err := c.ChooseSubtitles(sampleSubtitleTracks, time.Second)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ChooseSubtitles(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChooseSubtitles_Timeout(t *testing.T) {
+	// A reader that never delivers a newline simulates an idle user.
+	pr, _ := newBlockingReader()
+	c := New(pr, &bytes.Buffer{}, true)
+	start := time.Now()
+	got, err := c.ChooseSubtitles(sampleSubtitleTracks, 80*time.Millisecond)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("timeout should keep all (nil), got %v", got)
+	}
+	if elapsed := time.Since(start); elapsed < 60*time.Millisecond {
+		t.Errorf("returned too early (%s); expected to wait for timeout", elapsed)
+	}
+}
+
+func TestChooseSubtitles_NonInteractiveKeepsAll(t *testing.T) {
+	c := New(strings.NewReader("1\n"), &bytes.Buffer{}, false)
+	got, err := c.ChooseSubtitles(sampleSubtitleTracks, time.Second)
+	if err != nil || got != nil {
+		t.Fatalf("non-interactive should keep all: got %v err %v", got, err)
+	}
+}
+
+func TestChooseSubtitles_SingleTrackSkipsPrompt(t *testing.T) {
+	one := sampleSubtitleTracks[:1]
+	c := New(strings.NewReader("1\n"), &bytes.Buffer{}, true)
+	got, err := c.ChooseSubtitles(one, time.Second)
+	if err != nil || got != nil {
+		t.Fatalf("single track should keep all without prompting: got %v err %v", got, err)
+	}
+}
+
+func TestChooseSubtitles_RendersTracks(t *testing.T) {
+	out := &bytes.Buffer{}
+	c := New(strings.NewReader("1\n"), out, true)
+	_, _ = c.ChooseSubtitles(sampleSubtitleTracks, time.Second)
+	rendered := out.String()
+	for _, want := range []string{"Russian", "English SDH", "Japanese", "1.", "2.", "3."} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("menu output missing %q; got:\n%s", want, rendered)
+		}
+	}
+}
+
 func TestChooseAudio_Timeout(t *testing.T) {
 	// A reader that never delivers a newline simulates an idle user.
 	pr, _ := newBlockingReader()

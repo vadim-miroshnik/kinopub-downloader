@@ -2,11 +2,20 @@ package domain
 
 // Job represents a single download task for one episode.
 type Job struct {
-	Episode    Episode
-	Media      ResolvedMedia
-	OutPath    string
-	PosterPath string // path to a local poster image file to embed as cover art (optional)
+	Episode     Episode
+	Media       ResolvedMedia
+	OutPath     string
+	PosterPath  string // path to a local poster image file to embed as cover art (optional)
 	SeriesTitle string // series title for container metadata (optional)
+
+	// SubtitlesExternal, when true, writes subtitle tracks as sidecar .srt files
+	// next to OutPath instead of muxing them into the output container.
+	SubtitlesExternal bool
+
+	// SubtitlesOnly, when true, marks this job as a subtitles-only run: no video
+	// or audio is downloaded or muxed, and a failed sidecar conversion is fatal
+	// (it is the job's only product) rather than a best-effort warning.
+	SubtitlesOnly bool
 }
 
 // JobOutcome records the result of a single job after all attempts.

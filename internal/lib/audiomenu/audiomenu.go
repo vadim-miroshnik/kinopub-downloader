@@ -1,7 +1,8 @@
 // Package audiomenu provides an interactive, time-boxed CLI picker for audio
-// tracks. It implements domain.AudioChooser: the user is shown the available
-// tracks and given a bounded window to pick which to keep. If they make no
-// choice in time (or input is not a terminal), all tracks are kept.
+// and subtitle tracks. It implements both domain.AudioChooser and
+// domain.SubtitleChooser: the user is shown the available tracks and given a
+// bounded window to pick which to keep. If they make no choice in time (or
+// input is not a terminal), all tracks are kept.
 package audiomenu
 
 import (
@@ -93,6 +94,47 @@ func (c *Chooser) ChooseAudio(tracks []domain.AudioTrackInfo, timeout time.Durat
 	return idx, nil
 }
 
+// ChooseSubtitles implements domain.SubtitleChooser. It mirrors ChooseAudio:
+// it prints the subtitle track list and reads a selection line from in, waiting
+// at most timeout. The selection syntax is identical — comma-separated 1-based
+// indices and ranges, e.g. "1,3" or "1-2". "all" (or empty input / timeout)
+// keeps everything.
+//
+// Returned indices are 0-based (into tracks). A nil result means "keep all".
+func (c *Chooser) ChooseSubtitles(tracks []domain.SubtitleTrackInfo, timeout time.Duration) ([]int, error) {
+	if len(tracks) <= 1 || !c.interactive {
+		return nil, nil
+	}
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+
+	c.renderSubtitles(tracks, timeout)
+
+	line, ok := c.readSelection(timeout)
+	if !ok {
+		fmt.Fprintln(c.out, "\nNo selection — keeping all subtitle tracks.")
+		return nil, nil
+	}
+
+	sel := strings.ToLower(strings.TrimSpace(line))
+	switch sel {
+	case "", "all", "*", "none":
+		fmt.Fprintln(c.out, "Keeping all subtitle tracks.")
+		return nil, nil
+	}
+
+	idx, err := parseIndexSelection(sel, len(tracks))
+	if err != nil {
+		fmt.Fprintf(c.out, "Invalid selection (%v) — keeping all subtitle tracks.\n", err)
+		return nil, nil
+	}
+	if len(idx) == 0 {
+		return nil, nil
+	}
+	return idx, nil
+}
+
 // render prints the prompt and track list.
 func (c *Chooser) render(tracks []domain.AudioTrackInfo, timeout time.Duration) {
 	fmt.Fprintf(c.out, "\nAvailable audio tracks (choose within %s, Enter or TAB = all):\n", timeout.Round(time.Second))
@@ -103,6 +145,26 @@ func (c *Chooser) render(tracks []domain.AudioTrackInfo, timeout time.Duration) 
 		}
 		if label == "" {
 			label = "Audio"
+		}
+		if t.Language != "" && !strings.Contains(strings.ToLower(label), strings.ToLower(t.Language)) {
+			label = fmt.Sprintf("%s [%s]", label, t.Language)
+		}
+		fmt.Fprintf(c.out, "  %d. %s\n", i+1, label)
+	}
+	fmt.Fprint(c.out, "Selection (e.g. 1,3 or 2-3; Enter/TAB or 'all' to keep everything): ")
+}
+
+// renderSubtitles prints the prompt and subtitle track list. It mirrors render
+// but uses SubtitleTrackInfo.Label/Language for the displayed label.
+func (c *Chooser) renderSubtitles(tracks []domain.SubtitleTrackInfo, timeout time.Duration) {
+	fmt.Fprintf(c.out, "\nAvailable subtitle tracks (choose within %s, Enter or TAB = all):\n", timeout.Round(time.Second))
+	for i, t := range tracks {
+		label := t.Label
+		if label == "" {
+			label = t.Language
+		}
+		if label == "" {
+			label = "Subtitle"
 		}
 		if t.Language != "" && !strings.Contains(strings.ToLower(label), strings.ToLower(t.Language)) {
 			label = fmt.Sprintf("%s [%s]", label, t.Language)
@@ -296,5 +358,7 @@ func parseIndexSelection(s string, n int) ([]int, error) {
 	return out, nil
 }
 
-// Verify Chooser satisfies the port at compile time.
+// Verify Chooser satisfies the ports at compile time. The same value
+// implements both the audio and subtitle choosers.
 var _ domain.AudioChooser = (*Chooser)(nil)
+var _ domain.SubtitleChooser = (*Chooser)(nil)

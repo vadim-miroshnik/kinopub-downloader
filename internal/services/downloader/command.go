@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -146,17 +147,13 @@ func BuildSubtitleLabels(tracks []domain.SubtitleTrack) []string {
 // " (2)", " (3)", etc. to duplicates. The first occurrence keeps its original
 // label; subsequent duplicates get increasing suffixes.
 func makeUnique(labels []string) []string {
-	// Count occurrences of each label.
+	// Count occurrences so duplicate labels can be given ordinal suffixes:
+	// the first occurrence keeps the original; duplicates get " (2)", " (3)", etc.
 	counts := make(map[string]int)
 	for _, l := range labels {
 		counts[l]++
 	}
 
-	// For labels that appear more than once, assign ordinal suffixes.
-	// The first occurrence gets " (1)" and subsequent get " (2)", etc.
-	// Actually per the spec: first keeps original, duplicates get suffixes.
-	// Let's re-read: "append ordinal suffix ' (2)', ' (3)'" — so first stays,
-	// second gets (2), third gets (3).
 	seen := make(map[string]int)
 	result := make([]string, len(labels))
 	for i, l := range labels {
@@ -411,6 +408,21 @@ func BuildHLSMuxArgs(job domain.Job, hls *domain.HLSDownloadResult, tempPath str
 		args = append(args, "-i", a.Path)
 	}
 
+	// Subtitle muxing applies only when NOT in external/sidecar mode and there
+	// are subtitle tracks to mux. In external mode subtitles are written as
+	// sidecar .srt files separately, so the muxed output must be byte-identical
+	// to the no-subtitle case (AC2b regression guard).
+	muxSubs := !job.SubtitlesExternal && len(hls.Subtitles) > 0
+
+	// Inputs N+1..M: subtitle tracks. Each is a LOCAL HLS playlist of .vtt
+	// segments, which ffmpeg only reads with -allowed_extensions ALL -f hls
+	// placed immediately before the -i.
+	if muxSubs {
+		for _, s := range hls.Subtitles {
+			args = append(args, "-allowed_extensions", "ALL", "-f", "hls", "-i", s.Path)
+		}
+	}
+
 	// Map video from input 0.
 	args = append(args, "-map", "0:v:0")
 
@@ -425,8 +437,29 @@ func BuildHLSMuxArgs(job domain.Job, hls *domain.HLSDownloadResult, tempPath str
 		args = append(args, "-map", "0:a?")
 	}
 
+	// Map subtitle streams. Subtitle inputs start after the video (1) and audio
+	// inputs, so the first subtitle input index is 1 + len(AudioTracks).
+	if muxSubs {
+		subBase := 1 + len(hls.AudioTracks)
+		for k := range hls.Subtitles {
+			args = append(args, "-map", fmt.Sprintf("%d:s:0", subBase+k))
+		}
+	}
+
 	// Stream copy.
 	args = append(args, "-c", "copy")
+
+	// Subtitle codec depends on the output container. Placed after -c copy so it
+	// overrides only the subtitle streams. Only emitted when subtitles are muxed.
+	// (outFormat is computed below; recompute the format decision here.)
+	if muxSubs {
+		subCodec := "srt"
+		finalPath := strings.TrimSuffix(tempPath, ".tmp")
+		if strings.HasSuffix(finalPath, ".mp4") {
+			subCodec = "mov_text"
+		}
+		args = append(args, "-c:s", subCodec)
+	}
 
 	// Audio metadata: labels and languages.
 	labels := make([]string, len(hls.AudioTracks))
@@ -444,6 +477,18 @@ func BuildHLSMuxArgs(job domain.Job, hls *domain.HLSDownloadResult, tempPath str
 		args = append(args, fmt.Sprintf("-metadata:s:a:%d", i), fmt.Sprintf("title=%s", labels[i]))
 		if a.Language != "" {
 			args = append(args, fmt.Sprintf("-metadata:s:a:%d", i), fmt.Sprintf("language=%s", ToISO6392(a.Language)))
+		}
+	}
+
+	// Subtitle metadata: labels and languages. Labels prefer Name, fall back to
+	// Language, then "Subtitle", deduped via makeUnique (mirrors BuildSubtitleLabels).
+	if muxSubs {
+		subLabels := subtitleTrackLabels(hls.Subtitles)
+		for k, s := range hls.Subtitles {
+			args = append(args, fmt.Sprintf("-metadata:s:s:%d", k), fmt.Sprintf("title=%s", subLabels[k]))
+			if s.Language != "" {
+				args = append(args, fmt.Sprintf("-metadata:s:s:%d", k), fmt.Sprintf("language=%s", ToISO6392(s.Language)))
+			}
 		}
 	}
 
@@ -476,4 +521,57 @@ func BuildHLSMuxArgs(job domain.Job, hls *domain.HLSDownloadResult, tempPath str
 	args = append(args, tempPath)
 
 	return args
+}
+
+// subtitleTrackLabels derives a unique label for each HLS subtitle track,
+// preferring Name, falling back to Language, then "Subtitle". Duplicates get
+// ordinal suffixes via makeUnique (mirrors BuildSubtitleLabels for the HLS
+// subtitle track type).
+func subtitleTrackLabels(tracks []domain.HLSSubtitleTrack) []string {
+	labels := make([]string, len(tracks))
+	for i, t := range tracks {
+		switch {
+		case t.Name != "":
+			labels[i] = t.Name
+		case t.Language != "":
+			labels[i] = t.Language
+		default:
+			labels[i] = "Subtitle"
+		}
+	}
+	return makeUnique(labels)
+}
+
+// BuildSubtitleSidecarArgs constructs ffmpeg arguments to extract a single
+// subtitle track from a LOCAL HLS playlist (of .vtt segments) into a standalone
+// .srt sidecar file. The input is local, so no auth/proxy options are needed.
+//
+// Layout:
+//
+//	-y -allowed_extensions ALL -f hls -i <playlistPath> -map 0:s:0 -c:s srt -f srt <outSrtPath>
+func BuildSubtitleSidecarArgs(playlistPath, outSrtPath string) []string {
+	return []string{
+		"-y",
+		"-allowed_extensions", "ALL",
+		"-f", "hls",
+		"-i", playlistPath,
+		"-map", "0:s:0",
+		"-c:s", "srt",
+		"-f", "srt",
+		outSrtPath,
+	}
+}
+
+// SubtitleSidecarPath derives the sidecar .srt path for a subtitle track placed
+// next to the container output. The result is
+// "<containerOutPath without ext>.<lang>.srt"; when dedupSuffix is non-empty
+// (used to disambiguate multiple tracks sharing a language), it is inserted as
+// "<base>.<lang>.<dedupSuffix>.srt" so files do not collide.
+func SubtitleSidecarPath(containerOutPath, lang string, dedupSuffix string) string {
+	ext := filepath.Ext(containerOutPath)
+	base := strings.TrimSuffix(containerOutPath, ext)
+	if dedupSuffix != "" {
+		return fmt.Sprintf("%s.%s.%s.srt", base, lang, dedupSuffix)
+	}
+	return fmt.Sprintf("%s.%s.srt", base, lang)
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/lib/credstore"
 	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
 	"github.com/niazlv/kinopub-downloader/internal/lib/logx"
+	"github.com/niazlv/kinopub-downloader/internal/lib/termuxapi"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
 	"github.com/niazlv/kinopub-downloader/internal/services/doctor"
 	"github.com/niazlv/kinopub-downloader/internal/services/downloader"
@@ -32,7 +33,6 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/services/mediaresolver"
 	"github.com/niazlv/kinopub-downloader/internal/services/outputlayout"
 	"github.com/niazlv/kinopub-downloader/internal/services/pagescraper"
-	"github.com/niazlv/kinopub-downloader/internal/lib/termuxapi"
 	"github.com/niazlv/kinopub-downloader/internal/services/progress"
 	"github.com/niazlv/kinopub-downloader/internal/services/proxyprovider"
 	"github.com/niazlv/kinopub-downloader/internal/services/scheduler"
@@ -62,31 +62,35 @@ func run() int {
 
 	// Define flags.
 	var (
-		output      string
-		concurrency int
-		retries     int
-		proxyURL    string
-		quality     string
-		verbosity   string
-		ffmpegPath  string
-		logFile     string
-		container   string
-		force       bool
-		seasons     string
-		episodes    string
-		dryRun      bool
-		minInterval int
-		showVersion bool
-		cookie      string
-		userAgent   string
-		headerVals  headerList
-		browserCk   browserCookiesFlag
-		feedFile    string
-		ffmpegArgs  string
-		ffmpegX     ffmpegExtraList
-		noChunked   bool
-		audioSel    string
-		audioMenu   bool
+		output       string
+		concurrency  int
+		retries      int
+		proxyURL     string
+		quality      string
+		verbosity    string
+		ffmpegPath   string
+		logFile      string
+		container    string
+		force        bool
+		seasons      string
+		episodes     string
+		dryRun       bool
+		minInterval  int
+		showVersion  bool
+		cookie       string
+		userAgent    string
+		headerVals   headerList
+		browserCk    browserCookiesFlag
+		feedFile     string
+		ffmpegArgs   string
+		ffmpegX      ffmpegExtraList
+		noChunked    bool
+		audioSel     string
+		audioMenu    bool
+		subsSel      string
+		subsMenu     bool
+		subsExternal bool
+		subsOnly     bool
 	)
 
 	fs := flag.NewFlagSet("kinopub", flag.ContinueOnError)
@@ -121,6 +125,10 @@ func run() int {
 	fs.BoolVar(&noChunked, "no-chunked", false, "disable chunked HTTP download (use ffmpeg streaming for all sources)")
 	fs.StringVar(&audioSel, "audio", "", "audio track selection: comma-separated patterns; prefix with '!' (or '-') to exclude (e.g. \"anilibria\", \"!jpn\", \"anilibria,!jpn\")")
 	fs.BoolVar(&audioMenu, "audio-menu", false, "show an interactive audio-track picker before downloading (TTY only)")
+	fs.StringVar(&subsSel, "subs", "", "subtitle track selection: comma-separated patterns; prefix with '!' (or '-') to exclude (e.g. \"rus\", \"!eng\", \"rus,!eng\")")
+	fs.BoolVar(&subsMenu, "subs-menu", false, "show an interactive subtitle-track picker before downloading (TTY only)")
+	fs.BoolVar(&subsExternal, "subs-external", false, "save selected subtitles as separate .srt files instead of muxing them")
+	fs.BoolVar(&subsOnly, "subs-only", false, "download ONLY the selected subtitles as .srt files (no video/audio); requires a kino.pub page link with auth")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
 	fs.Usage = func() {
@@ -162,6 +170,12 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "  kinopub --audio \"anilibria,!jpn\" https://kino.pub/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Pick the audio track interactively before downloading\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --audio-menu https://kino.pub/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  # Keep only Russian subtitles, never the English ones\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --subs \"rus,!eng\" https://kino.pub/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  # Pick subtitles interactively, saved as sidecar .srt files\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --subs-menu --subs-external https://kino.pub/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  # Download ONLY Russian subtitles as .srt files (no video/audio)\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --subs-only --subs \"rus\" https://kino.pub/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # One-off with explicit cookies (without saving)\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --cookie \"cf_clearance=...; PHPSESSID=...\" <url>\n\n")
 		fmt.Fprintf(os.Stderr, "  # Use a locally saved feed file\n")
@@ -259,6 +273,13 @@ func run() int {
 		return 1
 	}
 
+	// Parse subtitle-track preference.
+	subtitlePref, err := kinopub.ParseSubtitlePreference(subsSel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
 	// Resolve the Cookie header: an explicit --cookie wins; otherwise try to
 	// auto-load cookies from the named browser; finally fall back to stored
 	// credentials from `kinopub login`.
@@ -306,30 +327,34 @@ func run() int {
 	extraFFmpegArgs = append(extraFFmpegArgs, ffmpegX...)
 
 	cfg := domain.RunConfig{
-		InputURL:        inputURL,
-		OutputPath:      output,
-		MaxConcurrency:  concurrency,
-		MaxRetries:      retries,
-		MinIntervalMS:   minInterval,
-		ProxyURL:        proxyURL,
-		Quality:         domain.Quality(quality),
-		Verbosity:       verb,
-		FFmpegPath:      ffmpegPath,
-		LogFilePath:     logFile,
-		Container:       cont,
-		ForceRedownload: force,
-		SeasonSel:       seasonSel,
-		EpisodeSel:      episodeSel,
-		DryRun:          dryRun,
-		Cookie:          resolvedCookie,
-		UserAgent:       userAgent,
-		Headers:         headerVals.toMap(),
-		BrowserCookies:  browserCk.value,
-		FeedFile:        feedFile,
-		FFmpegExtraArgs: extraFFmpegArgs,
-		NoChunked:       noChunked,
-		AudioPref:       audioPref,
-		AudioMenu:       audioMenu,
+		InputURL:          inputURL,
+		OutputPath:        output,
+		MaxConcurrency:    concurrency,
+		MaxRetries:        retries,
+		MinIntervalMS:     minInterval,
+		ProxyURL:          proxyURL,
+		Quality:           domain.Quality(quality),
+		Verbosity:         verb,
+		FFmpegPath:        ffmpegPath,
+		LogFilePath:       logFile,
+		Container:         cont,
+		ForceRedownload:   force,
+		SeasonSel:         seasonSel,
+		EpisodeSel:        episodeSel,
+		DryRun:            dryRun,
+		Cookie:            resolvedCookie,
+		UserAgent:         userAgent,
+		Headers:           headerVals.toMap(),
+		BrowserCookies:    browserCk.value,
+		FeedFile:          feedFile,
+		FFmpegExtraArgs:   extraFFmpegArgs,
+		NoChunked:         noChunked,
+		AudioPref:         audioPref,
+		AudioMenu:         audioMenu,
+		SubtitlePref:      subtitlePref,
+		SubtitleMenu:      subsMenu,
+		SubtitlesExternal: subsExternal,
+		SubtitlesOnly:     subsOnly,
 	}
 
 	// Apply defaults and validate.
@@ -374,9 +399,17 @@ func run() int {
 		return 1
 	}
 
-	_, runErr := app.Run(ctx, cfg)
+	result, runErr := app.Run(ctx, cfg)
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", runErr)
+		return 1
+	}
+
+	// In subtitles-only mode a missing/failed subtitle is a hard error. Report a
+	// non-zero exit when any episode failed (fail-at-end: other episodes' .srt
+	// files are still written, but the run is flagged as failed).
+	if cfg.SubtitlesOnly && result.Failed > 0 {
+		fmt.Fprintf(os.Stderr, "Error: %d of %d episode(s) had no matching subtitles\n", result.Failed, result.Total)
 		return 1
 	}
 
@@ -527,6 +560,12 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	// and stdin/stderr are a real terminal.
 	if cfg.AudioMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
 		deps.AudioChooser = audiomenu.New(os.Stdin, os.Stderr, true)
+	}
+
+	// Interactive subtitle-track picker. The audiomenu.Chooser implements both
+	// the audio and subtitle choosers, so the same value can serve both menus.
+	if cfg.SubtitleMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
+		deps.SubtitleChooser = audiomenu.New(os.Stdin, os.Stderr, true)
 	}
 
 	return deps, cleanup, nil
@@ -694,7 +733,8 @@ func makeRunFunc() downloader.RunFunc {
 
 // runLogin saves authentication credentials encrypted to disk.
 // Usage: kinopub login --cookie "..." [--user-agent "..."]
-//        kinopub login --browser-cookies [safari|chrome|firefox|auto]
+//
+//	kinopub login --browser-cookies [safari|chrome|firefox|auto]
 func runLogin(args []string) int {
 	fs := flag.NewFlagSet("kinopub login", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -1100,6 +1140,10 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s x      
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-chunked     -d "Disable chunked HTTP download"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l audio          -d "Audio track selection (e.g. anilibria,!jpn)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l audio-menu     -d "Show interactive audio-track picker"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs           -d "Subtitle track selection (e.g. rus,!eng)" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-menu      -d "Show interactive subtitle-track picker"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-external  -d "Save subtitles as separate .srt files"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-only      -d "Download only the selected subtitles (.srt), no video"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l version        -d "Print version and exit"
 
 # login flags
@@ -1135,7 +1179,8 @@ _kinopub_completion() {
     local main_flags="-o --output -c --concurrency --retries --proxy -q --quality
         --verbosity -v --ffmpeg --log-file --container --force --seasons --episodes
         --dry-run --min-interval --cookie --user-agent --header --browser-cookies
-        --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu --version"
+        --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu
+        --subs --subs-menu --subs-external --subs-only --version"
 
     # Detect which subcommand is active
     local subcmd=""
@@ -1185,7 +1230,7 @@ _kinopub_completion() {
                     --browser-cookies)
                         COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
                     --cookie|--user-agent|--proxy|--header|--seasons|--episodes| \
-                    --min-interval|--retries|--ffmpeg-args|-x|-c|--concurrency|--audio)
+                    --min-interval|--retries|--ffmpeg-args|-x|-c|--concurrency|--audio|--subs)
                         return ;;
                 esac
                 COMPREPLY=($(compgen -W "$main_flags" -- "$cur"))

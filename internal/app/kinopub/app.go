@@ -25,6 +25,9 @@ type Dependencies struct {
 
 	// Optional: interactive audio-track picker. nil disables the menu.
 	AudioChooser domain.AudioChooser
+
+	// Optional: interactive subtitle-track picker. nil disables the menu.
+	SubtitleChooser domain.SubtitleChooser
 }
 
 // App is the composition root that wires all services together and exposes

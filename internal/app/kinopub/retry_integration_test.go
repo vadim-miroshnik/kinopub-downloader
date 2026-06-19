@@ -48,7 +48,11 @@ func (f *fakeHLSDownloader) DownloadEpisode(_ context.Context, _ string, _ domai
 func (f *fakeHLSDownloader) ListAudioTracks(context.Context, string, domain.Quality) ([]domain.AudioTrackInfo, error) {
 	return nil, nil
 }
-func (f *fakeHLSDownloader) SetAudioPreference(domain.AudioPreference) {}
+func (f *fakeHLSDownloader) ListSubtitleTracks(context.Context, string, domain.Quality) ([]domain.SubtitleTrackInfo, error) {
+	return nil, nil
+}
+func (f *fakeHLSDownloader) SetAudioPreference(domain.AudioPreference)       {}
+func (f *fakeHLSDownloader) SetSubtitlePreference(domain.SubtitlePreference) {}
 
 // muxingDownloader is a mockDownloader that also satisfies domain.HLSMuxer.
 type muxingDownloader struct {
@@ -69,8 +73,8 @@ func (f *fakePageScraper) ExtractAllSeasons(context.Context, string) (*domain.Pa
 
 func makePlaylist(episodes int) *domain.PagePlaylist {
 	pl := &domain.PagePlaylist{
-		ItemID: 42,
-		Title:  "Test Series",
+		ItemID:  42,
+		Title:   "Test Series",
 		Seasons: []domain.PageSeason{{Season: 1, Count: episodes}},
 	}
 	for i := 1; i <= episodes; i++ {

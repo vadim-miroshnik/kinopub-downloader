@@ -2,6 +2,7 @@ package kinopub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -53,9 +54,21 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 		if err == nil {
 			return result, nil
 		}
+		// Subtitles-only must never fall back to the RSS pipeline, which would
+		// download full video+audio. Surface the HLS failure instead.
+		if cfg.SubtitlesOnly {
+			return result, fmt.Errorf("subtitles-only download failed: %w", err)
+		}
 		log.Warn("HLS pipeline failed, falling back to RSS pipeline",
 			domain.F("error", err.Error()),
 		)
+	}
+
+	// The RSS pipeline downloads full episodes and has no subtitle-only path, so
+	// --subs-only is only meaningful via the HLS pipeline (a kino.pub page link
+	// with valid credentials).
+	if cfg.SubtitlesOnly {
+		return domain.RunResult{}, fmt.Errorf("--subs-only requires the HLS pipeline (a kino.pub page link with valid credentials)")
 	}
 
 	return e.runRSS(ctx, cfg)
@@ -471,6 +484,36 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		for _, ep := range selected {
 			log.Info(fmt.Sprintf("  S%02dE%02d %s", ep.Key.Season, ep.Key.Episode, ep.Title))
 		}
+		// Best-effort: report the subtitle tracks that would be kept for the first
+		// episode and the output mode. Never fail the dry-run on a probe error.
+		if len(selected) > 0 {
+			firstURL := ""
+			for _, pe := range playlist.Episodes {
+				if pe.Season == selected[0].Key.Season && pe.Episode == selected[0].Key.Episode {
+					firstURL = pe.ManifestURL
+					break
+				}
+			}
+			if firstURL != "" {
+				if tracks, err := e.deps.HLSDownloader.ListSubtitleTracks(ctx, firstURL, cfg.Quality); err == nil && len(tracks) > 0 {
+					mode := "muxed"
+					if cfg.SubtitlesExternal {
+						mode = "external .srt"
+					}
+					if cfg.SubtitlesOnly {
+						mode = "subtitles-only .srt"
+					}
+					for _, idx := range domain.SelectSubtitles(tracks, cfg.SubtitlePref) {
+						t := tracks[idx]
+						label := t.Label
+						if label == "" {
+							label = t.Language
+						}
+						log.Info(fmt.Sprintf("  subtitle: %s (%s)", label, mode))
+					}
+				}
+			}
+		}
 		return domain.RunResult{Total: len(selected)}, nil
 	}
 
@@ -514,6 +557,13 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 	// interactive prompt isn't clobbered by progress redraws.
 	pref := e.resolveAudioPreference(ctx, cfg, selected, manifestMap)
 	e.deps.HLSDownloader.SetAudioPreference(pref)
+
+	// Resolve the subtitle-track preference the same way as audio: explicit
+	// --subs wins; otherwise an interactive menu (when enabled) probes the first
+	// episode; otherwise all tracks are kept. The resulting preference is pushed
+	// to the HLS downloader for all episodes.
+	subPref := e.resolveSubtitlePreference(ctx, cfg, selected, manifestMap)
+	e.deps.HLSDownloader.SetSubtitlePreference(subPref)
 
 	// 8. Start progress reporting.
 	plan := domain.SeriesPlan{
@@ -766,6 +816,12 @@ func (e *engine) attemptHLSEpisode(
 		return epFatal, fmt.Errorf("create directory: %w", err)
 	}
 
+	// Subtitles-only: fetch and write just the selected subtitle tracks; never
+	// download or mux video/audio.
+	if cfg.SubtitlesOnly {
+		return e.attemptSubtitlesOnly(ctx, cfg, ep, manifestURL, outPath)
+	}
+
 	e.deps.ProgressReporter.EpisodeStarted(ep.Key)
 
 	tsPath := outPath + ".ts"
@@ -788,10 +844,11 @@ func (e *engine) attemptHLSEpisode(
 	)
 
 	muxJob := domain.Job{
-		Episode:     ep,
-		OutPath:     outPath,
-		PosterPath:  posterPath,
-		SeriesTitle: series.Title,
+		Episode:           ep,
+		OutPath:           outPath,
+		PosterPath:        posterPath,
+		SeriesTitle:       series.Title,
+		SubtitlesExternal: cfg.SubtitlesExternal,
 	}
 
 	var remuxErr error
@@ -836,6 +893,70 @@ func (e *engine) attemptHLSEpisode(
 	return epSuccess, nil
 }
 
+// attemptSubtitlesOnly downloads ONLY the selected subtitle tracks for one
+// episode and writes them as sidecar .srt files next to outPath. No video or
+// audio is fetched or muxed, and the episode is NOT recorded as completed in
+// state, so re-running --subs-only is idempotent and independent of video
+// download state. A subtitle missing for the episode is a fatal (non-retried)
+// failure; transient network errors are retryable so the deferred-retry
+// scheduler reattempts them.
+func (e *engine) attemptSubtitlesOnly(
+	ctx context.Context,
+	cfg domain.RunConfig,
+	ep domain.Episode,
+	manifestURL string,
+	outPath string,
+) (episodeOutcome, error) {
+	log := e.deps.Logger.Component("engine-hls")
+	epLabel := fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)
+
+	sd, ok := e.deps.HLSDownloader.(domain.HLSSubtitleDownloader)
+	if !ok {
+		return epFatal, fmt.Errorf("HLS downloader does not support subtitles-only download")
+	}
+	writer, ok := e.deps.Downloader.(domain.SubtitleSidecarWriter)
+	if !ok {
+		return epFatal, fmt.Errorf("downloader does not support subtitle sidecar writing")
+	}
+
+	e.deps.ProgressReporter.EpisodeStarted(ep.Key)
+
+	res, dlErr := sd.DownloadSubtitlesOnly(ctx, manifestURL, cfg.Quality, outPath, ep.Key, e.deps.ProgressReporter)
+	if dlErr != nil {
+		if res != nil && res.TempDir != "" {
+			os.RemoveAll(res.TempDir)
+		}
+		// A missing subtitle won't appear on retry, so it is permanent.
+		if errors.Is(dlErr, domain.ErrNoSubtitlesMatched) {
+			return epFatal, dlErr
+		}
+		if ctx.Err() != nil || isTransientDownloadError(dlErr) {
+			return epRetryable, dlErr
+		}
+		return epFatal, dlErr
+	}
+
+	job := domain.Job{
+		Episode:       ep,
+		OutPath:       outPath,
+		SubtitlesOnly: true,
+	}
+	wErr := writer.WriteSubtitleSidecars(ctx, job, res)
+	if res.TempDir != "" {
+		os.RemoveAll(res.TempDir)
+	}
+	if wErr != nil {
+		log.Warn("subtitle sidecar writing failed",
+			domain.F("episode", epLabel),
+			domain.F("error", wErr.Error()),
+		)
+		return epFatal, wErr
+	}
+
+	log.Info("subtitles written", domain.F("episode", epLabel))
+	return epSuccess, nil
+}
+
 // transientErrorMarkers are substrings identifying recoverable network/CDN
 // failures: the connection or server hiccupped but is likely to recover, so
 // the episode should be retried later rather than abandoned.
@@ -849,10 +970,10 @@ var transientErrorMarkers = []string{
 	"connection refused",
 	"broken pipe",
 	"eof",
-	"no such host",        // transient DNS
-	"temporary failure",   // transient DNS
+	"no such host",      // transient DNS
+	"temporary failure", // transient DNS
 	"tls handshake",
-	"http 429", "429",     // rate limited
+	"http 429", "429", // rate limited
 	"http 500", "500",
 	"http 502", "502",
 	"http 503", "503",
@@ -877,8 +998,6 @@ func isTransientDownloadError(err error) bool {
 	return false
 }
 
-
-//
 // Precedence:
 //  1. An explicit cfg.AudioPref (from the --audio flag) is used as-is, with
 //     Prefer hints enriched from the first episode's tracks so a missing dub
@@ -950,6 +1069,74 @@ func (e *engine) resolveAudioPreference(
 	return domain.AudioPreference{}
 }
 
+// resolveSubtitlePreference resolves which subtitle tracks to keep, mirroring
+// resolveAudioPreference.
+//
+// Precedence:
+//  1. An explicit cfg.SubtitlePref (from the --subs flag) is used as-is.
+//  2. Otherwise, if the interactive menu is enabled and a chooser is wired,
+//     probe the first episode's tracks and prompt the user. The chosen tracks
+//     are generalized into a cross-episode preference.
+//  3. Otherwise, keep all tracks (zero preference).
+func (e *engine) resolveSubtitlePreference(
+	ctx context.Context,
+	cfg domain.RunConfig,
+	selected []domain.Episode,
+	manifestMap map[domain.EpisodeKey]string,
+) domain.SubtitlePreference {
+	log := e.deps.Logger.Component("engine")
+
+	// Fast path: no explicit preference and no interactive menu → keep all
+	// tracks without probing the network.
+	menuActive := cfg.SubtitleMenu && e.deps.SubtitleChooser != nil
+	if cfg.SubtitlePref.IsAll() && !menuActive {
+		return domain.SubtitlePreference{}
+	}
+
+	// Probe the first episode's subtitle tracks (best-effort) — used for the menu.
+	var tracks []domain.SubtitleTrackInfo
+	if len(selected) > 0 {
+		if url, ok := manifestMap[selected[0].Key]; ok && url != "" {
+			if t, err := e.deps.HLSDownloader.ListSubtitleTracks(ctx, url, cfg.Quality); err != nil {
+				log.Debug("subtitle track probe failed", domain.F("error", err.Error()))
+			} else {
+				tracks = t
+			}
+		}
+	}
+
+	// 1. Explicit --subs preference.
+	if !cfg.SubtitlePref.IsAll() {
+		pref := cfg.SubtitlePref
+		log.Info("subtitle preference (explicit)",
+			domain.F("include", strings.Join(pref.Include, ", ")),
+			domain.F("exclude", strings.Join(pref.Exclude, ", ")),
+		)
+		return pref
+	}
+
+	// 2. Interactive menu.
+	if menuActive && len(tracks) > 1 {
+		chosen, err := e.deps.SubtitleChooser.ChooseSubtitles(tracks, cfg.AudioMenuTimeout)
+		if err != nil {
+			log.Warn("subtitle menu failed, keeping all tracks", domain.F("error", err.Error()))
+			return domain.SubtitlePreference{}
+		}
+		if len(chosen) == 0 {
+			return domain.SubtitlePreference{}
+		}
+		pref := domain.BuildSubtitlePreference(tracks, chosen)
+		log.Info("subtitle preference (interactive)",
+			domain.F("include", strings.Join(pref.Include, ", ")),
+			domain.F("selected", len(chosen)),
+		)
+		return pref
+	}
+
+	// 3. Keep everything.
+	return domain.SubtitlePreference{}
+}
+
 // buildSeriesFromPlaylist constructs a domain.Series from page playlist data.
 func (e *engine) buildSeriesFromPlaylist(playlist *domain.PagePlaylist, cfg domain.RunConfig) domain.Series {
 	series := domain.Series{
@@ -1019,9 +1206,12 @@ func (e *engine) matchingEpisodes(series domain.Series, cfg domain.RunConfig) []
 	return matched
 }
 
-// filterCompleted removes already-completed episodes from the list (unless ForceRedownload).
+// filterCompleted removes already-completed episodes from the list (unless
+// ForceRedownload). In subtitles-only mode the completion state tracks the
+// video download, which is irrelevant here, so all selected episodes are kept
+// (the subtitles-only run does not mark state and is idempotent).
 func (e *engine) filterCompleted(episodes []domain.Episode, state domain.DownloadState, cfg domain.RunConfig) []domain.Episode {
-	if cfg.ForceRedownload {
+	if cfg.ForceRedownload || cfg.SubtitlesOnly {
 		return episodes
 	}
 	var selected []domain.Episode
@@ -1031,11 +1221,6 @@ func (e *engine) filterCompleted(episodes []domain.Episode, state domain.Downloa
 		}
 	}
 	return selected
-}
-
-// selectEpisodes filters episodes by season/episode selection and completion state.
-func (e *engine) selectEpisodes(series domain.Series, state domain.DownloadState, cfg domain.RunConfig) []domain.Episode {
-	return e.filterCompleted(e.matchingEpisodes(series, cfg), state, cfg)
 }
 
 // countSeasons counts episodes per season for the progress plan.
@@ -1056,19 +1241,6 @@ func countCompletedPerSeason(allEpisodes []domain.Episode, state domain.Download
 		}
 	}
 	return m
-}
-
-// downloadExecutor adapts the Downloader interface to the JobExecutor interface
-// expected by the Scheduler. Kept for compatibility.
-type downloadExecutor struct {
-	downloader domain.Downloader
-	reporter   domain.ProgressReporter
-}
-
-// Execute implements domain.JobExecutor.
-func (d *downloadExecutor) Execute(ctx context.Context, job domain.Job) error {
-	d.reporter.EpisodeStarted(job.Episode.Key)
-	return d.downloader.Download(ctx, job, d.reporter)
 }
 
 // seriesDirPath computes the series download directory path using the same

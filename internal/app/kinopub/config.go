@@ -136,6 +136,45 @@ func ParseAudioPreference(s string) (domain.AudioPreference, error) {
 	return pref, nil
 }
 
+// ParseSubtitlePreference parses a --subs selector string into a
+// SubtitlePreference. The syntax is a comma-separated list of patterns; a
+// pattern prefixed with "!" or "-" is an exclusion, everything else is an
+// inclusion. Matching is substring/language based and case-insensitive (see
+// domain.SubtitlePreference). Examples:
+//
+//	"rus"          keep only tracks matching "rus"
+//	"!eng"         drop the English track, keep the rest
+//	"rus,!eng"     keep Russian, and never the English track
+//	"" or "all"    keep every track
+func ParseSubtitlePreference(s string) (domain.SubtitlePreference, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "all") {
+		return domain.SubtitlePreference{}, nil
+	}
+
+	var pref domain.SubtitlePreference
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		neg := false
+		for len(part) > 0 && (part[0] == '!' || part[0] == '-') {
+			neg = true
+			part = strings.TrimSpace(part[1:])
+		}
+		if part == "" {
+			return domain.SubtitlePreference{}, fmt.Errorf("%w: empty subtitle pattern in %q", domain.ErrInvalidFlag, s)
+		}
+		if neg {
+			pref.Exclude = append(pref.Exclude, part)
+		} else {
+			pref.Include = append(pref.Include, part)
+		}
+	}
+	return pref, nil
+}
+
 // ParseSelection parses a selection string like "1,3-5,8" into a Selection.
 // An empty string returns Selection{All: true}.
 // Supports single numbers ("1,3,5"), ranges ("1-5"), and mixed ("1,3-5,8").

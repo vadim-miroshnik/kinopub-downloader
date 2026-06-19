@@ -18,9 +18,10 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ domain.Downloader  = (*Downloader)(nil)
-	_ domain.JobExecutor = (*Downloader)(nil)
-	_ domain.HLSMuxer    = (*Downloader)(nil)
+	_ domain.Downloader            = (*Downloader)(nil)
+	_ domain.JobExecutor           = (*Downloader)(nil)
+	_ domain.HLSMuxer              = (*Downloader)(nil)
+	_ domain.SubtitleSidecarWriter = (*Downloader)(nil)
 )
 
 // RunFunc is a function that runs a command, streaming stdout to the provided
@@ -114,7 +115,6 @@ func New(run RunFunc, proxy domain.ProxyProvider, logger domain.Logger, opts ...
 // the traditional ffmpeg-based streaming approach.
 func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.ProgressSink) error {
 	// Determine if we can use chunked mode.
-	// Determine if we can use chunked mode.
 	// Skip chunked for local files (no http:// prefix) — they're already on disk.
 	isRemoteURL := strings.HasPrefix(job.Media.Source.URL, "http://") ||
 		strings.HasPrefix(job.Media.Source.URL, "https://")
@@ -161,7 +161,7 @@ func (d *Downloader) downloadChunked(ctx context.Context, job domain.Job, sink d
 		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
 	)
 
-	if err := d.remuxLocal(ctx, job, rawPath); err != nil {
+	if err := d.RemuxLocal(ctx, job, rawPath); err != nil {
 		// Clean up raw file on remux failure.
 		os.Remove(rawPath)
 		return fmt.Errorf("remux: %w", err)
@@ -177,12 +177,6 @@ func (d *Downloader) downloadChunked(ctx context.Context, job domain.Job, sink d
 	)
 
 	return nil
-}
-
-// remuxLocal runs ffmpeg to remux a local raw file into the final container
-// with all metadata, poster, and audio/subtitle labels.
-func (d *Downloader) remuxLocal(ctx context.Context, job domain.Job, rawPath string) error {
-	return d.RemuxLocal(ctx, job, rawPath)
 }
 
 // MuxHLS combines a downloaded HLS video file with separate audio tracks into
@@ -216,6 +210,85 @@ func (d *Downloader) MuxHLS(ctx context.Context, job domain.Job, hls *domain.HLS
 		return fmt.Errorf("rename temp to final: %w", err)
 	}
 
+	// In external/sidecar mode, write each subtitle track as a standalone .srt
+	// next to the output. The video+audio mux has already succeeded, so a
+	// sidecar failure is logged as a warning and does not fail the episode.
+	// This runs while hls.TempDir still exists (the engine cleans it afterwards).
+	if job.SubtitlesExternal && len(hls.Subtitles) > 0 {
+		// Best-effort in mux mode: a sidecar failure never fails the episode
+		// because the muxed video+audio output already succeeded.
+		_ = d.writeSubtitleSidecars(ctx, job, hls)
+	}
+
+	return nil
+}
+
+// WriteSubtitleSidecars writes the subtitle tracks from an HLS result as
+// standalone .srt sidecar files next to job.OutPath, without muxing any video.
+// It implements domain.SubtitleSidecarWriter for the --subs-only pipeline. When
+// job.SubtitlesOnly is set, a conversion failure is returned as an error (the
+// sidecars are the job's only product); otherwise failures are warned best-effort.
+func (d *Downloader) WriteSubtitleSidecars(ctx context.Context, job domain.Job, hls *domain.HLSDownloadResult) error {
+	return d.writeSubtitleSidecars(ctx, job, hls)
+}
+
+// writeSubtitleSidecars extracts each HLS subtitle track into a standalone
+// .srt sidecar file next to job.OutPath. Filenames collide-proof against tracks
+// sharing a language by appending a numeric suffix. In subtitles-only mode
+// (job.SubtitlesOnly) the first conversion failure is returned; otherwise
+// failures are warned and skipped, and the function returns nil.
+func (d *Downloader) writeSubtitleSidecars(ctx context.Context, job domain.Job, hls *domain.HLSDownloadResult) error {
+	var firstErr error
+	// Determine a language tag per track and detect collisions so duplicates get
+	// a disambiguating suffix.
+	langs := make([]string, len(hls.Subtitles))
+	langCount := make(map[string]int)
+	for i, s := range hls.Subtitles {
+		lang := ToISO6392(s.Language)
+		if lang == "" {
+			lang = ToISO6392(s.Name)
+		}
+		if lang == "" {
+			lang = "und"
+		}
+		langs[i] = lang
+		langCount[lang]++
+	}
+
+	langSeen := make(map[string]int)
+	for i, s := range hls.Subtitles {
+		lang := langs[i]
+		dedup := ""
+		if langCount[lang] > 1 {
+			langSeen[lang]++
+			dedup = fmt.Sprintf("%d", langSeen[lang])
+		}
+		outSrt := SubtitleSidecarPath(job.OutPath, lang, dedup)
+		args := BuildSubtitleSidecarArgs(s.Path, outSrt)
+		if err := d.run(ctx, d.ffmpegPath, args, nil, nil); err != nil {
+			d.logger.Warn("subtitle sidecar generation failed",
+				domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+				domain.F("subtitle", s.Name),
+				domain.F("output", outSrt),
+				domain.F("error", err.Error()),
+			)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("subtitle %q: %w", s.Name, err)
+			}
+			continue
+		}
+		d.logger.Info("subtitle sidecar written",
+			domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+			domain.F("language", lang),
+			domain.F("output", outSrt),
+		)
+	}
+
+	// In subtitles-only mode the sidecars are the only product, so a conversion
+	// failure must fail the episode. In mux/external mode it is best-effort.
+	if job.SubtitlesOnly {
+		return firstErr
+	}
 	return nil
 }
 
@@ -369,8 +442,3 @@ func (d *Downloader) Execute(ctx context.Context, job domain.Job) error {
 func estimateDuration(job domain.Job) time.Duration {
 	return job.Media.Duration
 }
-
-// noopSink is a ProgressSink that discards all updates.
-type noopSink struct{}
-
-func (noopSink) TrackProgress(_ domain.EpisodeKey, _ domain.TrackRef, _ int) {}

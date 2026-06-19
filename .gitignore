@@ -17,3 +17,6 @@
 
 # Local test data
 s1e1.html
+
+# OMC orchestration artifacts
+.omc/
