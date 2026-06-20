@@ -400,3 +400,31 @@ func TestParseSelection_InvalidInput(t *testing.T) {
 		})
 	}
 }
+
+func TestParseURLSeasonEpisode(t *testing.T) {
+	tests := []struct {
+		name         string
+		url          string
+		wantS, wantE int
+		wantOK       bool
+	}{
+		{"s1e1", "https://kino.pub/item/view/122734/s1e1", 1, 1, true},
+		{"s10e25", "https://kino.pub/item/view/122734/s10e25", 10, 25, true},
+		{"trailing_slash", "https://kino.pub/item/view/122734/s2e3/", 2, 3, true},
+		{"uppercase", "https://kino.pub/item/view/122734/S4E7", 4, 7, true},
+		{"with_query", "https://kino.pub/item/view/122734/s1e2?utm=x", 1, 2, true},
+		{"no_suffix", "https://kino.pub/item/view/122734", 0, 0, false},
+		{"slug_only", "https://kino.pub/item/view/122734/some-title", 0, 0, false},
+		{"empty", "", 0, 0, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, e, ok := ParseURLSeasonEpisode(tc.url)
+			if ok != tc.wantOK || s != tc.wantS || e != tc.wantE {
+				t.Errorf("ParseURLSeasonEpisode(%q) = (%d, %d, %v), want (%d, %d, %v)",
+					tc.url, s, e, ok, tc.wantS, tc.wantE, tc.wantOK)
+			}
+		})
+	}
+}

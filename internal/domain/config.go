@@ -75,6 +75,12 @@ type RunConfig struct {
 	// resume capability. When true, all downloads go through ffmpeg directly.
 	NoChunked bool
 
+	// VideoMenu enables the interactive video-quality picker shown before the
+	// first download. When the user makes no choice within AudioMenuTimeout, the
+	// configured/automatic quality is kept. The menu is only shown on a TTY and
+	// only in the HLS pipeline.
+	VideoMenu bool
+
 	// AudioPref selects which audio tracks to keep. The zero value keeps every
 	// track. See AudioPreference for matching semantics. (audio selection)
 	AudioPref AudioPreference

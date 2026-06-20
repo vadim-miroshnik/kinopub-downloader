@@ -135,6 +135,59 @@ func (c *Chooser) ChooseSubtitles(tracks []domain.SubtitleTrackInfo, timeout tim
 	return idx, nil
 }
 
+// ChooseVideo implements domain.VideoChooser. It prints the quality variant
+// list and reads a single 1-based selection from in, waiting at most timeout.
+// Unlike the audio/subtitle pickers this is a single choice: only the first
+// index given is used. Empty input, "auto", or a timeout returns -1, meaning
+// "keep the configured/automatic quality".
+func (c *Chooser) ChooseVideo(tracks []domain.VideoTrackInfo, timeout time.Duration) (int, error) {
+	if len(tracks) <= 1 || !c.interactive {
+		return -1, nil
+	}
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+
+	c.renderVideo(tracks, timeout)
+
+	line, ok := c.readSelection(timeout)
+	if !ok {
+		fmt.Fprintln(c.out, "\nNo selection — keeping automatic quality.")
+		return -1, nil
+	}
+
+	sel := strings.ToLower(strings.TrimSpace(line))
+	switch sel {
+	case "", "auto", "*":
+		fmt.Fprintln(c.out, "Keeping automatic quality.")
+		return -1, nil
+	}
+
+	idx, err := parseIndexSelection(sel, len(tracks))
+	if err != nil {
+		fmt.Fprintf(c.out, "Invalid selection (%v) — keeping automatic quality.\n", err)
+		return -1, nil
+	}
+	if len(idx) == 0 {
+		return -1, nil
+	}
+	return idx[0], nil
+}
+
+// renderVideo prints the prompt and quality variant list for the single-choice
+// video picker.
+func (c *Chooser) renderVideo(tracks []domain.VideoTrackInfo, timeout time.Duration) {
+	fmt.Fprintf(c.out, "\nAvailable video qualities (choose within %s, Enter or TAB = automatic):\n", timeout.Round(time.Second))
+	for i, t := range tracks {
+		label := t.Label
+		if label == "" {
+			label = fmt.Sprintf("%dp", t.Height)
+		}
+		fmt.Fprintf(c.out, "  %d. %s\n", i+1, label)
+	}
+	fmt.Fprint(c.out, "Selection (e.g. 1; Enter/TAB or 'auto' to keep automatic): ")
+}
+
 // render prints the prompt and track list.
 func (c *Chooser) render(tracks []domain.AudioTrackInfo, timeout time.Duration) {
 	fmt.Fprintf(c.out, "\nAvailable audio tracks (choose within %s, Enter or TAB = all):\n", timeout.Round(time.Second))
@@ -362,3 +415,4 @@ func parseIndexSelection(s string, n int) ([]int, error) {
 // implements both the audio and subtitle choosers.
 var _ domain.AudioChooser = (*Chooser)(nil)
 var _ domain.SubtitleChooser = (*Chooser)(nil)
+var _ domain.VideoChooser = (*Chooser)(nil)

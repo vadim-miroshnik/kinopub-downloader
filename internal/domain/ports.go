@@ -226,6 +226,12 @@ type HLSDownloader interface {
 	// preferences.
 	ListSubtitleTracks(ctx context.Context, manifestURL string, quality Quality) ([]SubtitleTrackInfo, error)
 
+	// ListVideoVariants fetches the master playlist and reports the distinct
+	// video quality variants, without downloading anything. It lets the caller
+	// present an interactive quality picker. Variants are deduplicated by
+	// resolution and codec so each entry maps to a stable quality selector.
+	ListVideoVariants(ctx context.Context, manifestURL string) ([]VideoTrackInfo, error)
+
 	// SetAudioPreference sets the audio-track filter applied to subsequent
 	// DownloadEpisode calls. The zero AudioPreference keeps every track.
 	SetAudioPreference(pref AudioPreference)
@@ -233,6 +239,16 @@ type HLSDownloader interface {
 	// SetSubtitlePreference sets the subtitle-track filter applied to subsequent
 	// DownloadEpisode calls. The zero SubtitlePreference keeps every track.
 	SetSubtitlePreference(pref SubtitlePreference)
+}
+
+// VideoChooser presents the available video quality variants to the user and
+// returns the index to keep. Implementations may block for input up to a
+// timeout; on timeout or non-interactive input they should keep the default
+// (return a negative index).
+type VideoChooser interface {
+	// ChooseVideo shows variants and returns the selected index. A negative
+	// result means "keep the configured/automatic quality".
+	ChooseVideo(tracks []VideoTrackInfo, timeout time.Duration) (int, error)
 }
 
 // AudioChooser presents the available audio tracks to the user and returns the

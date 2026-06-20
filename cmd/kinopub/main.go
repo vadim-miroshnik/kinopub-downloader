@@ -87,6 +87,8 @@ func run() int {
 		noChunked    bool
 		audioSel     string
 		audioMenu    bool
+		videoMenu    bool
+		interactive  bool
 		subsSel      string
 		subsMenu     bool
 		subsExternal bool
@@ -124,11 +126,14 @@ func run() int {
 	fs.Var(&ffmpegX, "x", "extra ffmpeg argument (repeatable, advanced, e.g. --x \"-c:v\" --x libx265)")
 	fs.BoolVar(&noChunked, "no-chunked", false, "disable chunked HTTP download (use ffmpeg streaming for all sources)")
 	fs.StringVar(&audioSel, "audio", "", "audio track selection: comma-separated patterns; prefix with '!' (or '-') to exclude (e.g. \"anilibria\", \"!jpn\", \"anilibria,!jpn\")")
+	fs.BoolVar(&videoMenu, "video-menu", false, "show an interactive video-quality picker before downloading (TTY only)")
 	fs.BoolVar(&audioMenu, "audio-menu", false, "show an interactive audio-track picker before downloading (TTY only)")
 	fs.StringVar(&subsSel, "subs", "", "subtitle track selection: comma-separated patterns; prefix with '!' (or '-') to exclude (e.g. \"rus\", \"!eng\", \"rus,!eng\")")
 	fs.BoolVar(&subsMenu, "subs-menu", false, "show an interactive subtitle-track picker before downloading (TTY only)")
 	fs.BoolVar(&subsExternal, "subs-external", false, "save selected subtitles as separate .srt files instead of muxing them")
 	fs.BoolVar(&subsOnly, "subs-only", false, "download ONLY the selected subtitles as .srt files (no video/audio); requires a kino.pub page link with auth")
+	fs.BoolVar(&interactive, "interactive", false, "interactively pick video quality, then audio, then subtitles before downloading (enables --video-menu, --audio-menu and --subs-menu; TTY only)")
+	fs.BoolVar(&interactive, "i", false, "interactively pick video, audio and subtitles (shorthand)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
 	fs.Usage = func() {
@@ -170,6 +175,8 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "  kinopub --audio \"anilibria,!jpn\" https://kino.pub/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Pick the audio track interactively before downloading\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --audio-menu https://kino.pub/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  # Pick quality, then audio, then subtitles interactively, then download\n")
+		fmt.Fprintf(os.Stderr, "  kinopub -i https://kino.pub/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Keep only Russian subtitles, never the English ones\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --subs \"rus,!eng\" https://kino.pub/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Pick subtitles interactively, saved as sidecar .srt files\n")
@@ -187,6 +194,15 @@ func run() int {
 			return 0
 		}
 		return 1
+	}
+
+	// The combined --interactive/-i flag is a convenience that turns on all three
+	// pickers; they then run in order (quality → audio → subtitles) before the
+	// download starts.
+	if interactive {
+		videoMenu = true
+		audioMenu = true
+		subsMenu = true
 	}
 
 	// Support the space-separated form "--browser-cookies safari": because the
@@ -264,6 +280,18 @@ func run() int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
+	}
+
+	// A trailing /sNeM in a kino.pub page link acts as an implicit
+	// single-episode filter, but only when the user did not pass explicit
+	// --seasons/--episodes flags (those always win).
+	if s, ep, ok := kinopub.ParseURLSeasonEpisode(inputURL); ok {
+		if seasons == "" {
+			seasonSel = domain.Selection{Values: map[int]bool{s: true}}
+		}
+		if episodes == "" {
+			episodeSel = domain.Selection{Values: map[int]bool{ep: true}}
+		}
 	}
 
 	// Parse audio-track preference.
@@ -349,6 +377,7 @@ func run() int {
 		FeedFile:          feedFile,
 		FFmpegExtraArgs:   extraFFmpegArgs,
 		NoChunked:         noChunked,
+		VideoMenu:         videoMenu,
 		AudioPref:         audioPref,
 		AudioMenu:         audioMenu,
 		SubtitlePref:      subtitlePref,
@@ -554,6 +583,13 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 			hlsdownloader.WithProxy(proxyProv.ProxyURL()))
 		deps.PageScraper = scraper
 		deps.HLSDownloader = hlsDl
+	}
+
+	// Interactive video-quality picker. The audiomenu.Chooser implements the
+	// video, audio, and subtitle choosers, so the same value can serve all three
+	// menus. Only meaningful on a real terminal.
+	if cfg.VideoMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
+		deps.VideoChooser = audiomenu.New(os.Stdin, os.Stderr, true)
 	}
 
 	// Interactive audio-track picker. Only meaningful when the menu is enabled
@@ -1139,11 +1175,13 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l ff
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s x                  -d "Extra ffmpeg argument (repeatable)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-chunked     -d "Disable chunked HTTP download"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l audio          -d "Audio track selection (e.g. anilibria,!jpn)" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l video-menu     -d "Show interactive video-quality picker"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l audio-menu     -d "Show interactive audio-track picker"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs           -d "Subtitle track selection (e.g. rus,!eng)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-menu      -d "Show interactive subtitle-track picker"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-external  -d "Save subtitles as separate .srt files"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-only      -d "Download only the selected subtitles (.srt), no video"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s i -l interactive    -d "Pick quality, audio and subtitles interactively"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l version        -d "Print version and exit"
 
 # login flags
@@ -1179,8 +1217,8 @@ _kinopub_completion() {
     local main_flags="-o --output -c --concurrency --retries --proxy -q --quality
         --verbosity -v --ffmpeg --log-file --container --force --seasons --episodes
         --dry-run --min-interval --cookie --user-agent --header --browser-cookies
-        --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu
-        --subs --subs-menu --subs-external --subs-only --version"
+        --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu --video-menu
+        --subs --subs-menu --subs-external --subs-only -i --interactive --version"
 
     # Detect which subcommand is active
     local subcmd=""

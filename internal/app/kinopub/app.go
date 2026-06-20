@@ -23,6 +23,9 @@ type Dependencies struct {
 	HLSDownloader domain.HLSDownloader // nil when auth unavailable
 	PageScraper   domain.PageScraper   // nil when auth unavailable
 
+	// Optional: interactive video-quality picker. nil disables the menu.
+	VideoChooser domain.VideoChooser
+
 	// Optional: interactive audio-track picker. nil disables the menu.
 	AudioChooser domain.AudioChooser
 

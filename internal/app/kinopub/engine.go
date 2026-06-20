@@ -555,6 +555,12 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 	// and let the user choose. The resulting preference is pushed to the HLS
 	// downloader for all episodes. This runs before progress rendering so the
 	// interactive prompt isn't clobbered by progress redraws.
+	// Resolve the video quality first: when the interactive quality menu is
+	// enabled it probes the first episode's variants and lets the user pick. The
+	// chosen quality drives the audio/subtitle probing below and every episode's
+	// download, so it must be resolved before those steps.
+	cfg.Quality = e.resolveQuality(ctx, cfg, selected, manifestMap)
+
 	pref := e.resolveAudioPreference(ctx, cfg, selected, manifestMap)
 	e.deps.HLSDownloader.SetAudioPreference(pref)
 
@@ -1006,6 +1012,55 @@ func isTransientDownloadError(err error) bool {
 //     probe the first episode's tracks and prompt the user. The chosen tracks
 //     are generalized into a cross-episode preference.
 //  3. Otherwise, keep all tracks (zero preference).
+//
+// resolveQuality resolves which video quality to download. When the interactive
+// quality menu is enabled and a chooser is wired, it probes the first episode's
+// master playlist for the available variants and prompts the user; the chosen
+// variant's selector string becomes the quality used for every episode. When
+// the menu is disabled, the user makes no choice, or no variants can be probed,
+// the configured cfg.Quality is returned unchanged.
+func (e *engine) resolveQuality(
+	ctx context.Context,
+	cfg domain.RunConfig,
+	selected []domain.Episode,
+	manifestMap map[domain.EpisodeKey]string,
+) domain.Quality {
+	log := e.deps.Logger.Component("engine")
+
+	if !cfg.VideoMenu || e.deps.VideoChooser == nil || len(selected) == 0 {
+		return cfg.Quality
+	}
+
+	url, ok := manifestMap[selected[0].Key]
+	if !ok || url == "" {
+		return cfg.Quality
+	}
+
+	variants, err := e.deps.HLSDownloader.ListVideoVariants(ctx, url)
+	if err != nil {
+		log.Debug("video variant probe failed", domain.F("error", err.Error()))
+		return cfg.Quality
+	}
+	if len(variants) <= 1 {
+		return cfg.Quality
+	}
+
+	chosen, err := e.deps.VideoChooser.ChooseVideo(variants, cfg.AudioMenuTimeout)
+	if err != nil {
+		log.Warn("video menu failed, keeping automatic quality", domain.F("error", err.Error()))
+		return cfg.Quality
+	}
+	if chosen < 0 || chosen >= len(variants) {
+		return cfg.Quality
+	}
+
+	log.Info("video quality (interactive)",
+		domain.F("quality", variants[chosen].Label),
+		domain.F("selector", variants[chosen].Quality),
+	)
+	return domain.Quality(variants[chosen].Quality)
+}
+
 func (e *engine) resolveAudioPreference(
 	ctx context.Context,
 	cfg domain.RunConfig,

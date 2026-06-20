@@ -47,6 +47,18 @@ func (v Variant) Label() string {
 	return fmt.Sprintf("%dp/%s (%d kbps)", v.Height, codec, v.BitrateKbps())
 }
 
+// QualitySelector returns the quality preference string that reselects this
+// variant via SelectVariant, e.g. "1080p-h265". It pairs the resolution height
+// with the codec family so the same quality is chosen for every episode, even
+// though the per-episode media playlist URLs differ.
+func (v Variant) QualitySelector() string {
+	codec := "h264"
+	if v.IsH265() {
+		codec = "h265"
+	}
+	return fmt.Sprintf("%dp-%s", v.Height, codec)
+}
+
 // SelectVariant chooses the best variant based on quality preference.
 //
 // Quality preference modes:

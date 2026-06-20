@@ -51,6 +51,9 @@ func (f *fakeHLSDownloader) ListAudioTracks(context.Context, string, domain.Qual
 func (f *fakeHLSDownloader) ListSubtitleTracks(context.Context, string, domain.Quality) ([]domain.SubtitleTrackInfo, error) {
 	return nil, nil
 }
+func (f *fakeHLSDownloader) ListVideoVariants(context.Context, string) ([]domain.VideoTrackInfo, error) {
+	return nil, nil
+}
 func (f *fakeHLSDownloader) SetAudioPreference(domain.AudioPreference)       {}
 func (f *fakeHLSDownloader) SetSubtitlePreference(domain.SubtitlePreference) {}
 
