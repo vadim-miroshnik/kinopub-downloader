@@ -3,12 +3,36 @@ package kinopub
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
+
+// itemURLSeasonEpisodeRe matches a trailing /sNeM segment of a kino.pub item
+// URL, capturing the season and episode numbers. It tolerates an optional
+// trailing slash and a query string.
+var itemURLSeasonEpisodeRe = regexp.MustCompile(`(?i)/s(\d+)e(\d+)/?(?:\?.*)?$`)
+
+// ParseURLSeasonEpisode extracts the season and episode numbers from a trailing
+// /sNeM segment of a kino.pub item URL, e.g.
+//
+//	https://kino.pub/item/view/122734/s1e1 → (1, 1, true)
+//	https://kino.pub/item/view/122734      → (0, 0, false)
+//
+// It is used to derive an implicit single-episode filter from the link when the
+// user passes no explicit --seasons/--episodes flags.
+func ParseURLSeasonEpisode(rawURL string) (season, episode int, ok bool) {
+	m := itemURLSeasonEpisodeRe.FindStringSubmatch(rawURL)
+	if m == nil {
+		return 0, 0, false
+	}
+	season, _ = strconv.Atoi(m[1])
+	episode, _ = strconv.Atoi(m[2])
+	return season, episode, true
+}
 
 // ValidateConfig validates all config fields and returns ErrInvalidFlag with a
 // descriptive message for out-of-range or invalid values.
@@ -92,7 +116,7 @@ func ApplyDefaults(cfg *domain.RunConfig) {
 	if !cfg.EpisodeSel.All && len(cfg.EpisodeSel.Values) == 0 && len(cfg.EpisodeSel.Ranges) == 0 {
 		cfg.EpisodeSel = domain.Selection{All: true}
 	}
-	if cfg.AudioMenu && cfg.AudioMenuTimeout == 0 {
+	if (cfg.AudioMenu || cfg.SubtitleMenu || cfg.VideoMenu) && cfg.AudioMenuTimeout == 0 {
 		cfg.AudioMenuTimeout = 90 * time.Second
 	}
 }

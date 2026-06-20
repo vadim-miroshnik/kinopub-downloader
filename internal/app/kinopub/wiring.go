@@ -19,7 +19,7 @@ func validateDependencies(deps Dependencies) error {
 		fieldName := t.Field(i).Name
 
 		// Skip optional fields.
-		if fieldName == "HLSDownloader" || fieldName == "PageScraper" || fieldName == "AudioChooser" || fieldName == "SubtitleChooser" {
+		if fieldName == "HLSDownloader" || fieldName == "PageScraper" || fieldName == "VideoChooser" || fieldName == "AudioChooser" || fieldName == "SubtitleChooser" {
 			continue
 		}
 

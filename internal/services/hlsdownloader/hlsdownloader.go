@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -399,6 +400,52 @@ func (d *Downloader) ListSubtitleTracks(ctx context.Context, manifestURL string,
 	infos := make([]domain.SubtitleTrackInfo, len(renditions))
 	for i, r := range renditions {
 		infos[i] = domain.SubtitleTrackInfo{Index: i, Label: r.Name, Language: r.Language}
+	}
+	return infos, nil
+}
+
+// ListVideoVariants fetches the master playlist and reports the distinct video
+// quality variants (deduplicated by resolution and codec), without downloading
+// anything. The Quality field of each entry is a selector string that reselects
+// the same variant for every episode; when several bitrates share a
+// resolution/codec the lowest-bitrate one is reported, matching SelectVariant's
+// tie-break. Variants are ordered best-first (highest resolution, then bitrate).
+func (d *Downloader) ListVideoVariants(ctx context.Context, manifestURL string) ([]domain.VideoTrackInfo, error) {
+	master, err := FetchMasterPlaylist(ctx, d.client, manifestURL, d.auth, d.logger)
+	if err != nil {
+		return nil, fmt.Errorf("master playlist: %w", err)
+	}
+	if len(master.Variants) == 0 {
+		return nil, fmt.Errorf("no variants found in master playlist")
+	}
+
+	// Deduplicate by quality selector, keeping the lowest-bitrate representative
+	// so the displayed label matches what SelectVariant will later pick.
+	best := make(map[string]Variant)
+	for _, v := range master.Variants {
+		sel := v.QualitySelector()
+		if cur, ok := best[sel]; !ok || v.Bandwidth < cur.Bandwidth {
+			best[sel] = v
+		}
+	}
+
+	infos := make([]domain.VideoTrackInfo, 0, len(best))
+	for sel, v := range best {
+		infos = append(infos, domain.VideoTrackInfo{
+			Label:       v.Label(),
+			Quality:     sel,
+			Height:      v.Height,
+			BitrateKbps: v.BitrateKbps(),
+		})
+	}
+	sort.Slice(infos, func(i, j int) bool {
+		if infos[i].Height != infos[j].Height {
+			return infos[i].Height > infos[j].Height
+		}
+		return infos[i].BitrateKbps > infos[j].BitrateKbps
+	})
+	for i := range infos {
+		infos[i].Index = i
 	}
 	return infos, nil
 }
